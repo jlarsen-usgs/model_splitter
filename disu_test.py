@@ -19,6 +19,6 @@ array[65:] = 1
 mfsplit = Mf6Splitter(sim)
 new_sim = mfsplit.split_model(array)
 
-new_sim.set_sim_path("disu_split")
+new_sim.set_sim_path(os.path.join("examples", "data", "disu_split"))
 new_sim.write_simulation()
 new_sim.run_simulation()
