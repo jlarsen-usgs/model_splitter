@@ -6,7 +6,7 @@ from model_splitter import Mf6Splitter
 
 
 ws = os.path.abspath(os.path.dirname(__file__))
-sim_ws = os.path.join(ws, "disu_model")
+sim_ws = os.path.join(ws, "examples", "data", "disu_model")
 sim = flopy.mf6.MFSimulation.load(sim_ws=sim_ws)
 
 gwf = sim.get_model()
