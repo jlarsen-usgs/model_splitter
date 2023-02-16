@@ -6,7 +6,6 @@ from model_splitter import Mf6Splitter
 
 
 ws = os.path.abspath(os.path.dirname(__file__))
-ws = os.path.join(ws, "..", "flopy-dev")
 sim_ws = os.path.join(ws, "examples", "data", "mf6-freyberg")
 sim = flopy.mf6.MFSimulation.load(sim_ws=sim_ws)
 sim.run_simulation()
@@ -49,7 +48,7 @@ plt.show()
 
 mfsplit = Mf6Splitter(sim)
 new_sim = mfsplit.split_model(array)
-new_sim.set_sim_path("dis_split")
+new_sim.set_sim_path(os.path.join("examples", "output", "dis_split"))
 new_sim.write_simulation()
 new_sim.run_simulation()
 
