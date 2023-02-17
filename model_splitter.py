@@ -19,6 +19,8 @@ class Mf6Splitter(object):
         if modelname is None:
             self._modelname = self._model.name
         self._model_type = self._model.model_type
+        if self._model_type.endswith("6"):
+            self._model_type = self._model_type[:-1]
         self._modelgrid = self._model.modelgrid
         self._node_map = {}
         self._new_connections = None
@@ -430,7 +432,7 @@ class Mf6Splitter(object):
                 value = value[0][0]
                 for mdl in mapped_data.keys():
                     new_val = value.split(".")
-                    new_val = f"{new_val[0]}_{mdl}.{new_val[1]}"
+                    new_val = f"{'.'.join(new_val[0:-1])}_{mdl}.{new_val[-1]}"
                     mapped_data[mdl][item] = new_val
         return mapped_data
 
@@ -455,8 +457,6 @@ class Mf6Splitter(object):
                 cl12.extend(params["cl12"])
                 hwva.extend(params["hwva"])
 
-            print(np.sum(iac))
-            print(len(ja))
             assert np.sum(iac) == len(ja)
 
             mapped_data[mkey]["nja"] = len(ja)
@@ -544,7 +544,7 @@ class Mf6Splitter(object):
             for model in self._model_dict.keys():
                 mapped_data[model][item] = recarray.copy()
         else:
-            cellids = mflist.cellid
+            cellids = recarray.cellid
             if self._modelgrid.grid_type in ("structured", "vertex"):
                 lay_num = np.array([i[0] for i in cellids])
                 if self._modelgrid.grid_type == "structured":
@@ -586,6 +586,89 @@ class Mf6Splitter(object):
                     new_recarray["cellid"] = new_cellids
 
                 mapped_data[mkey][item] = new_recarray
+
+        return mapped_data
+
+    def _remap_uzf(self, package, mapped_data):
+        """
+        Method to remap a UZF package, probably will work for UZT also
+        need to check the input structure of UZT
+
+        Parameters
+        ----------
+        package : ModflowGwfuzf
+        mapped_data : dict
+
+        Returns
+        -------
+            dict
+        """
+        self._uzf_remap = {}
+        packagedata = package.packagedata.array
+        perioddata = package.perioddata.data
+
+        cellids = packagedata.cellid
+        if self._modelgrid.grid_type == "structured":
+            cellids = [(0, i[1], i[2]) for i in packagedata.cellid]
+            layers = np.array([i[0] for i in packagedata.cellid])
+            nodes = self._modelgrid.get_node(cellids)
+        elif self._modelgrid.grid_type == "vertex":
+            layers = np.array([i[0] for i in packagedata.cellid])
+            nodes = [i[1] for i in packagedata.cellid]
+        else:
+            nodes = [i[0] for i in packagedata.cellid]
+            layers = None
+
+        new_model = np.zeros((len(cellids),), dtype=int)
+        new_node = np.zeros((len(cellids),), dtype=int)
+        for ix, node in enumerate(nodes):
+            nm, nn = self._node_map[node]
+            new_model[ix] = nm
+            new_node[ix] = nn
+
+        for mkey, model in self._model_dict.items():
+            idx = np.where(new_model == mkey)[0]
+            if len(idx) == 0:
+                new_recarray = None
+            else:
+                new_recarray = packagedata[idx]
+
+            if new_recarray is not None:
+                uzf_remap = {i: ix for ix, i in enumerate(new_recarray.iuzno)}
+                uzf_nodes = [i for i in uzf_remap.keys()]
+                uzf_remap[-1] = -1
+
+            model_node = new_node[idx].astype(int)
+            if self._modelgrid.grid_type == "structured":
+                model_node += (layers[idx] * model.modelgrid.ncpl)
+                new_cellids = model.modelgrid.get_lrc(
+                    model_node.astype(int)
+                )
+            elif self._modelgrid.grid_type == "vertex":
+                new_cellids = [
+                    tuple(cid) for cid in zip(layers[idx], model_node)
+                ]
+
+            else:
+                new_cellids = [(i,) for i in model_node]
+
+            if new_recarray is not None:
+                new_recarray["cellid"] = new_cellids
+                new_recarray["iuzno"] = [uzf_remap[i] for i in new_recarray["iuzno"]]
+                new_recarray["ivertcon"] = [uzf_remap[i] for i in new_recarray["ivertcon"]]
+
+                spd = {}
+                for per, recarray in perioddata.items():
+                    idx = np.where(np.isin(recarray.iuzno, uzf_nodes))
+                    new_period = recarray[idx]
+                    new_period["iuzno"] = [uzf_remap[i] for i in new_period['iuzno']]
+                    spd[per] = new_period
+
+            mapped_data[mkey]['packagedata'] = new_recarray
+            mapped_data[mkey]['nuzfcells'] = len(new_recarray)
+            mapped_data[mkey]['ntrailwaves'] = package.ntrailwaves.array
+            mapped_data[mkey]['nwavesets'] = package.nwavesets.array
+            mapped_data[mkey]["perioddata"] = spd
 
         return mapped_data
 
@@ -639,8 +722,10 @@ class Mf6Splitter(object):
 
         # todo: child packages??? This is an issue that still needs solving.
 
-        # todo: need a DISU trap for ja, ia, hvwa
         mapped_data = {mkey: {} for mkey in self._model_dict.keys()}
+        if isinstance(package, flopy.mf6.ModflowUtlobs):
+            return
+
         if isinstance(
                 package,
                 (flopy.mf6.modflow.ModflowGwfdis,
@@ -667,7 +752,8 @@ class Mf6Splitter(object):
                         mapped_data[mkey][item] = (i1 - i0) + 1
 
                 elif item == "nlay":
-                    continue
+                    for mkey in self._model_dict.keys():
+                        mapped_data[mkey][item] = value.array
 
                 elif item == "nodes":
                     for mkey in self._model_dict.keys():
@@ -679,6 +765,9 @@ class Mf6Splitter(object):
 
                 elif isinstance(value, flopy.mf6.data.mfdataarray.MFArray):
                     mapped_data = self._remap_array(item, value, mapped_data)
+
+        elif isinstance(package, flopy.mf6.ModflowGwfuzf):
+            mapped_data = self._remap_uzf(package, mapped_data)
 
         else:
             for item, value in package.__dict__.items():
@@ -732,7 +821,7 @@ class Mf6Splitter(object):
                         mapped_data[mkey][item] = value.array
 
         pak_cls = PackageContainer.package_factory(package.package_type,
-                                                   package.parent.model_type)
+                                                   self._model_type)
         paks = {}
         for mdl, data in mapped_data.items():
             paks[mdl] = pak_cls(self._model_dict[mdl], **data)
@@ -828,10 +917,12 @@ class Mf6Splitter(object):
                                     cellidm0 = node0
                                     cellidm1 = node1
 
-                                if modelgrid0.idomain[cellidm0] == 0:
-                                    continue
-                                if modelgrid1.idomain[cellidm1] == 0:
-                                    continue
+                                if modelgrid0.idomain is not None:
+                                    if modelgrid0.idomain[cellidm0] == 0:
+                                        continue
+                                if modelgrid1.idomain is not None:
+                                    if modelgrid1.idomain[cellidm1] == 0:
+                                        continue
                                 # calculate CL1, CL2 from exchange metadata
                                 meta = self._exchange_metadata[m0][node0][node1]
                                 ivrt = meta[2]
