@@ -1,5 +1,6 @@
 import numpy as np
 import flopy
+import pandas as pd
 from flopy.mf6.mfbase import PackageContainer
 import matplotlib.pyplot as plt
 import inspect
@@ -423,7 +424,8 @@ class Mf6Splitter(object):
         if item in (
                 "budget_filerecord",
                 "head_filerecord",
-                "budgetcsv_filerecord"
+                "budgetcsv_filerecord",
+                "stage_filerecord"
         ):
             value = value.array
             if value is None:
@@ -490,7 +492,7 @@ class Mf6Splitter(object):
 
         if not hasattr(mfarray, "size"):
             mfarray = mfarray.array
-        # todo: compare array against ncpl to determine if it's 2d or 3d
+
         nlay = 1
         if isinstance(self._modelgrid.ncpl, (list, np.ndarray)):
             ncpl = self._modelgrid.nnodes
@@ -672,6 +674,165 @@ class Mf6Splitter(object):
 
         return mapped_data
 
+    def _remap_mvr(self, package, mapped_data):
+        """
+        Method to remap internal and external movers from an existing
+        MVR package
+
+        Parameters
+        ----------
+        package :
+        mapped_data :
+
+        Returns
+        -------
+            dict
+        """
+        self._mvr_remaps = {}
+        perioddata = package.perioddata.data
+        # todo can't remap until LAK and SFR are finished...
+        print('break')
+
+
+    def _remap_lak(self, package, mapped_data):
+        """
+        Method to remap an existing LAK package
+
+        Parameters
+        ----------
+        package :
+        mapped_data :
+
+        Returns
+        -------
+            dict
+        """
+        packagedata = package.packagedata.array
+        connectiondata = package.connectiondata.array
+        tables = package.tables.array
+        outlets = package.outlets.array
+        perioddata = package.perioddata.data
+
+        self._lak_remaps = {} # should be old lak : (model, new lak)
+        # todo: first need to remap the connectiondata and create a lut
+        cellids = connectiondata.cellid
+        if self._modelgrid.grid_type == "structured":
+            cellids = [(0, i[1], i[2]) for i in cellids]
+            layers = np.array([i[0] for i in connectiondata.cellid])
+            nodes = self._modelgrid.get_node(cellids)
+        elif self._modelgrid.grid_type == "vertex":
+            layers = np.array([i[0] for i in connectiondata.cellid])
+            nodes = [i[1] for i in cellids]
+        else:
+            nodes = [i[0] for i in cellids]
+            layers = None
+
+        new_model = np.zeros((len(cellids),), dtype=int)
+        new_node = np.zeros((len(cellids),), dtype=int)
+        for ix, node in enumerate(nodes):
+            nm, nn = self._node_map[node]
+            new_model[ix] = nm
+            new_node[ix] = nn
+
+        # todo: remap nodes now..., set and store new lak numbers....
+        for mkey, model in self._model_dict.items():
+            idx = np.where(new_model == mkey)[0]
+            if len(idx) == 0:
+                new_recarray = None
+            else:
+                new_recarray = connectiondata[idx]
+
+            if new_recarray is not None:
+                model_node = new_node[idx].astype(int)
+                if self._modelgrid.grid_type == "structured":
+                    model_node += (layers[idx] * model.modelgrid.ncpl)
+                    new_cellids = model.modelgrid.get_lrc(
+                        model_node.astype(int)
+                    )
+                elif self._modelgrid.grid_type == "vertex":
+                    new_cellids = [
+                        tuple(cid) for cid in zip(layers[idx], model_node)
+                    ]
+
+                else:
+                    new_cellids = [(i,) for i in model_node]
+
+                new_recarray["cellid"] = new_cellids
+
+                for nlak, lak in enumerate(sorted(np.unique(new_recarray.lakeno))):
+                    self._lak_remaps[lak] = (mkey, nlak)
+
+                new_lak = [self._lak_remaps[i][-1] for i in new_recarray.lakeno]
+                new_recarray["lakeno"] = new_lak
+
+                new_packagedata = self._remap_adv_tag(mkey, packagedata, "lakeno", self._lak_remaps)
+
+                new_tables = None
+                if tables is not None:
+                    new_tables = self._remap_adv_tag(mkey, tables, "lakeno", self._lak_remaps)
+
+                new_outlets = None
+                if outlets is not None:
+                    mapnos = []
+                    for lak, meta in self._lak_remaps.items():
+                        if meta[0] == mkey:
+                            mapnos.append(lak)
+
+                    idxs = np.where(np.isin(outlets.lakein, mapnos))[0]
+                    if len(idxs) == 0:
+                        new_outlets = None
+                    else:
+                        new_outlets = outlets[idxs]
+                        lakein = [self._lak_remaps[i][-1] for i in new_outlets.lakein]
+                        lakeout = [self._lak_remaps[i][-1] if i in self._lak_remaps else -1 for i in new_outlets.lakeout]
+                        outletno = list(range(len(new_outlets)))
+                        new_outlets["outletno"] = outletno
+                        new_outlets["lakein"] = lakein
+                        new_outlets["lakeout"] = lakeout
+
+                spd = {}
+                for k, recarray in perioddata.items():
+                    new_ra = self._remap_adv_tag(mkey, recarray, "number", self._lak_remaps)
+                    spd[k] = new_ra
+
+                if new_recarray is not None:
+                    mapped_data[mkey]["connectiondata"] = new_recarray
+                    mapped_data[mkey]["packagedata"] = new_packagedata
+                    mapped_data[mkey]["tables"] = new_tables
+                    mapped_data[mkey]["outlets"] = new_outlets
+                    mapped_data[mkey]["perioddata"] = spd
+                    mapped_data[mkey]["nlakes"] = len(new_packagedata.lakeno)
+                    if new_outlets is not None:
+                        mapped_data[mkey]["noutlets"] = len(new_outlets)
+                    if new_tables is not None:
+                        mapped_data[mkey]["ntables"] = len(new_tables)
+
+        return mapped_data
+
+    def _remap_adv_tag(self, mkey, recarray, item, mapper, renumber=None):
+        """
+
+        :param recarray:
+        :param item:
+        :param mapper:
+        :return:
+        """
+        mapnos = []
+        for lak, meta in mapper.items():
+            if meta[0] == mkey:
+                mapnos.append(lak)
+
+        idxs = np.where(np.isin(recarray[item], mapnos))[0]
+        if len(idxs) == 0:
+            new_recarray = None
+        else:
+            new_recarray = recarray[idxs]
+            newnos = [self._lak_remaps[i][-1] for i in new_recarray[item]]
+            new_recarray[item] = newnos
+        return new_recarray
+
+
+
     def _remap_transient_list(self, item, mftransientlist, mapped_data):
         """
         Method to remap transient list data to each model
@@ -730,7 +891,8 @@ class Mf6Splitter(object):
                 package,
                 (flopy.mf6.modflow.ModflowGwfdis,
                  flopy.mf6.modflow.ModflowGwfdisu,
-                 flopy.mf6.modflow.ModflowGwtdis)
+                 flopy.mf6.modflow.ModflowGwtdis,
+                 flopy.mf6.modflow.ModflowGwtdisu)
         ):
             for item, value in package.__dict__.items():
                 if item in ('delr', "delc"):
@@ -768,6 +930,13 @@ class Mf6Splitter(object):
 
         elif isinstance(package, flopy.mf6.ModflowGwfuzf):
             mapped_data = self._remap_uzf(package, mapped_data)
+
+        elif isinstance(package, flopy.mf6.ModflowGwfmvr):
+            pass
+            # mapped_data = self._remap_mvr(package, mapped_data)
+
+        elif isinstance(package, flopy.mf6.ModflowGwflak):
+            mapped_data = self._remap_lak(package, mapped_data)
 
         else:
             for item, value in package.__dict__.items():
@@ -809,6 +978,7 @@ class Mf6Splitter(object):
                     print('break')
 
         if "options" in package.blocks:
+            print(package)
             for item, value in package.blocks["options"].datasets.items():
                 if item.endswith("_filerecord"):
                     mapped_data = self._remap_filerecords(item, value, mapped_data)
