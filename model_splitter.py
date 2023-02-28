@@ -809,7 +809,7 @@ class Mf6Splitter(object):
 
         return mapped_data
 
-    def _remap_adv_tag(self, mkey, recarray, item, mapper, renumber=None):
+    def _remap_adv_tag(self, mkey, recarray, item, mapper):
         """
 
         :param recarray:
@@ -827,11 +827,9 @@ class Mf6Splitter(object):
             new_recarray = None
         else:
             new_recarray = recarray[idxs]
-            newnos = [self._lak_remaps[i][-1] for i in new_recarray[item]]
+            newnos = [mapper[i][-1] for i in new_recarray[item]]
             new_recarray[item] = newnos
         return new_recarray
-
-
 
     def _remap_transient_list(self, item, mftransientlist, mapped_data):
         """
@@ -978,7 +976,6 @@ class Mf6Splitter(object):
                     print('break')
 
         if "options" in package.blocks:
-            print(package)
             for item, value in package.blocks["options"].datasets.items():
                 if item.endswith("_filerecord"):
                     mapped_data = self._remap_filerecords(item, value, mapped_data)
