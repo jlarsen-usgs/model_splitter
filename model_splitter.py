@@ -34,6 +34,11 @@ class Mf6Splitter(object):
         self._connection_ivert = None
         self._model_dict = None
         self._ivert_vert_remap = None
+        self._lak_remaps = {}
+        self._sfr_remaps = {}
+        self._uzf_remap = {}
+        self._lak_remaps = {}
+        self._sfr_mover_connections = []
 
     @property
     def new_simulation(self):
@@ -605,7 +610,6 @@ class Mf6Splitter(object):
         -------
             dict
         """
-        self._uzf_remap = {}
         packagedata = package.packagedata.array
         perioddata = package.perioddata.data
 
@@ -713,8 +717,8 @@ class Mf6Splitter(object):
         outlets = package.outlets.array
         perioddata = package.perioddata.data
 
-        self._lak_remaps = {} # should be old lak : (model, new lak)
-        # todo: first need to remap the connectiondata and create a lut
+        # todo: think we can generalize this method and then call it as a
+        #  function by most/all advanced packages...
         cellids = connectiondata.cellid
         if self._modelgrid.grid_type == "structured":
             cellids = [(0, i[1], i[2]) for i in cellids]
@@ -734,7 +738,6 @@ class Mf6Splitter(object):
             new_model[ix] = nm
             new_node[ix] = nn
 
-        # todo: remap nodes now..., set and store new lak numbers....
         for mkey, model in self._model_dict.items():
             idx = np.where(new_model == mkey)[0]
             if len(idx) == 0:
@@ -806,6 +809,201 @@ class Mf6Splitter(object):
                         mapped_data[mkey]["noutlets"] = len(new_outlets)
                     if new_tables is not None:
                         mapped_data[mkey]["ntables"] = len(new_tables)
+
+        return mapped_data
+
+    def _remap_sfr(self, package, mapped_data):
+        """
+        Method to remap an existing SFR package
+
+        Parameters
+        ----------
+        package :
+        mapped_data :
+
+        Returns
+        -------
+            dict
+        """
+        packagedata = package.packagedata.array
+        crosssections = package.crosssections.array
+        connectiondata = package.connectiondata.array
+        diversions = package.diversions.array
+        perioddata = package.perioddata.data
+
+        div_mvr_conn = {}
+        sfr_mvr_conn = []
+        # sub-method #1 to split out
+        cellids = packagedata.cellid
+        if self._modelgrid.grid_type == "structured":
+            cellids = [(0, i[1], i[2]) for i in cellids]
+            layers = np.array([i[0] for i in packagedata.cellid])
+            nodes = self._modelgrid.get_node(cellids)
+        elif self._modelgrid.grid_type == "vertex":
+            layers = np.array([i[0] for i in packagedata.cellid])
+            nodes = [i[1] for i in cellids]
+        else:
+            nodes = [i[0] for i in cellids]
+            layers = None
+
+        # sub method #2 to split out on generalize
+        new_model = np.zeros((len(cellids),), dtype=int)
+        new_node = np.zeros((len(cellids),), dtype=int)
+        for ix, node in enumerate(nodes):
+            nm, nn = self._node_map[node]
+            new_model[ix] = nm
+            new_node[ix] = nn
+
+        for mkey, model in self._model_dict.items():
+            idx = np.where(new_model == mkey)[0]
+            if len(idx) == 0:
+                new_recarray = None
+            else:
+                new_recarray = packagedata[idx]
+
+            # sub-method # 3 to split and generalize
+            if new_recarray is not None:
+                model_node = new_node[idx].astype(int)
+                if self._modelgrid.grid_type == "structured":
+                    model_node += (layers[idx] * model.modelgrid.ncpl)
+                    new_cellids = model.modelgrid.get_lrc(
+                        model_node.astype(int)
+                    )
+                elif self._modelgrid.grid_type == "vertex":
+                    new_cellids = [
+                        tuple(cid) for cid in zip(layers[idx], model_node)
+                    ]
+
+                else:
+                    new_cellids = [(i,) for i in model_node]
+
+                new_recarray["cellid"] = new_cellids
+
+                new_rno = []
+                old_rno = []
+                for ix, rno in enumerate(new_recarray.rno):
+                    new_rno.append(ix)
+                    old_rno.append(rno)
+                    self._sfr_remaps[rno] = (mkey, ix)
+                    self._sfr_remaps[-1 * rno] = (mkey, -1 * ix)
+
+                new_recarray["rno"] = new_rno
+
+                # now let's remap connection data and tag external exchanges
+                idx = np.where(np.isin(connectiondata.rno, old_rno))[0]
+                new_connectiondata = connectiondata[idx]
+
+                for ix, rec in enumerate(new_connectiondata):
+                    new_rec = []
+                    for item in new_connectiondata.dtype.names:
+                        if rec[item] in self._sfr_remaps:
+                            mn, nrno = self._sfr_remaps[rec[item]]
+                            if mn != mkey:
+                                new_rec.append(np.nan)
+                            else:
+                                new_rec.append(self._sfr_remaps[rec[item]][-1])
+                        elif np.isnan(rec[item]):
+                            new_rec.append(np.nan)
+                        else:
+                            # this is an instance where we need to map
+                            # external connections!
+                            new_rec.append(np.nan)
+                            if rec[item] < 0:
+                                # downstream connection
+                                sfr_mvr_conn.append((rec["rno"], int(abs(rec[item]))))
+                            else:
+                                sfr_mvr_conn.append((int(rec[item]), rec["rno"]))
+
+                    new_connectiondata[ix] = tuple(new_rec)
+
+                new_crosssections = None
+                if crosssections is not None:
+                    new_crosssections = self._remap_adv_tag(
+                        mkey, crosssections, "rno", self._sfr_remaps
+                    )
+
+                new_diversions = None
+                div_mover_ix = []
+                if diversions is not None:
+                    # first check if diversion outlet is outside the model
+                    for ix, rec in enumerate(diversions):
+                        rno = rec.rno
+                        iconr = rec.iconr
+                        if rno not in self._sfr_remaps and iconr not in self._sfr_remaps:
+                            continue
+                        elif rno in self._sfr_remaps and iconr not in self._sfr_remaps:
+                            div_mover_ix.append(ix)
+                        else:
+                            m0 = self._sfr_remaps[rno][0]
+                            m1 = self._sfr_remaps[iconr][0]
+                            if m0 != m1:
+                                div_mover_ix.append(ix)
+
+                    idx = np.where(np.isin(diversions.rno, old_rno))[0]
+                    idx = np.where(~np.isin(idx, div_mover_ix))[0]
+
+                    new_diversions = diversions[idx]
+                    new_rno = [self._sfr_remaps[i][-1] for i in new_diversions.rno]
+                    new_iconr = [self._sfr_remaps[i][-1] for i in new_diversions.iconr]
+                    new_idv = list(range(len(new_diversions)))
+                    new_diversions["rno"] = new_rno
+                    new_diversions["iconr"] = new_iconr
+                    new_diversions["idv"] = new_idv
+
+                    externals = diversions[div_mover_ix]
+                    for rec in externals:
+                        div_mvr_conn[rec["idv"]] = [rec["rno"], rec["iconr"], rec["cprior"]]
+
+                # now we can do the stress period data
+                spd = {}
+                for kper, recarray in perioddata.items():
+                    idx = np.where(np.isin(recarray.rno, old_rno))[0]
+                    new_spd = recarray[idx]
+                    if diversions is not None:
+                        external_divs = np.where(
+                            np.isin(new_spd.idv, list(div_mvr_conn.keys()))
+                        )[0]
+                        if len(external_divs) > 0:
+                            for ix in external_divs:
+                                rec = recarray[ix]
+                                idv = recarray["idv"]
+                                div_mvr_conn[idv].append(rec["divflow"])
+
+                        idx = np.where(
+                            ~np.isin(new_spd.idv, list(div_mvr_conn.keys()))
+                        )[0]
+
+                        new_spd = new_spd[idx]
+
+                    # now to renamp the rnos...
+                    new_rno = [self._sfr_remaps[i][-1] for i in new_spd.rno]
+                    new_spd["rno"] = new_rno
+                    spd[kper] = new_spd
+
+                mapped_data[mkey]["packagedata"] = new_recarray
+                mapped_data[mkey]["connectiondata"] = new_connectiondata
+                mapped_data[mkey]["crosssections"] = new_crosssections
+                mapped_data[mkey]["diversions"] = new_diversions
+                mapped_data[mkey]["perioddata"] = spd
+                mapped_data[mkey]["nreaches"] = len(new_recarray)
+
+        for rec in sfr_mvr_conn:
+            m0, n0 = self._sfr_remaps[rec[0]]
+            m1, n1 = self._sfr_remaps[rec[1]]
+            self._sfr_mover_connections.append(
+                [self._model_dict[m0].name, n0,
+                 self._model_dict[m1].name, n1,
+                 "FACTOR", 1]
+            )
+
+        for idv, rec in div_mvr_conn.items():
+            m0, n0 = self._sfr_remaps[rec[0]]
+            m1, n1 = self._sfr_remaps[rec[1]]
+            self._sfr_mover_connections.append(
+                [self._model_dict[m0].name, n0,
+                 self._model_dict[m1].name, n1,
+                 rec[2], rec[3]]
+            )
 
         return mapped_data
 
@@ -936,6 +1134,9 @@ class Mf6Splitter(object):
         elif isinstance(package, flopy.mf6.ModflowGwflak):
             mapped_data = self._remap_lak(package, mapped_data)
 
+        elif isinstance(package, flopy.mf6.ModflowGwfsfr):
+            mapped_data = self._remap_sfr(package, mapped_data)
+
         else:
             for item, value in package.__dict__.items():
                 if item.startswith("_"):
@@ -973,7 +1174,7 @@ class Mf6Splitter(object):
                     for mkey in self._model_dict.keys():
                         mapped_data[mkey][item] = value.data
                 else:
-                    print('break')
+                    pass
 
         if "options" in package.blocks:
             for item, value in package.blocks["options"].datasets.items():
