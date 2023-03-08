@@ -34,11 +34,15 @@ class Mf6Splitter(object):
         self._connection_ivert = None
         self._model_dict = None
         self._ivert_vert_remap = None
-        self._lak_remaps = {}
-        self._sfr_remaps = {}
-        self._uzf_remap = {}
-        self._lak_remaps = {}
-        self._sfr_mover_connections = []
+        self._sfr_remaps = {} # remove me later
+        self._uzf_remap = {} # remove me later
+        self._lak_remaps = {} # remove me later
+        self._sfr_mover_connections = [] # keep SFR mover connections, but will need to store package name information too!!!!
+        self._mover = False
+        self._pkg_mover = False
+        self._pkg_mover_name = None
+        self._mover_remaps = {}
+        self._sim_mover_data = {}
 
     @property
     def new_simulation(self):
@@ -523,7 +527,7 @@ class Mf6Splitter(object):
 
         return mapped_data
 
-    def _remap_mflist(self, item, mflist, mapped_data):
+    def _remap_mflist(self, item, mflist, mapped_data, transient=False):
         """
         Method to remap mflist data to each model
 
@@ -535,11 +539,14 @@ class Mf6Splitter(object):
             MFList object
         mapped_data : dict
             dictionary of remapped package data
-
+        transient : bool
+            flag to indicate this is transient stress period data
+            flag is needed to trap for remapping mover data.
         Returns
         -------
             dict
         """
+        mvr_remap = {}
         if hasattr(mflist, "array"):
             if mflist.array is None:
                 return mapped_data
@@ -572,6 +579,9 @@ class Mf6Splitter(object):
 
             for mkey, model in self._model_dict.items():
                 idx = np.where(new_model == mkey)[0]
+                if self._pkg_mover and transient:
+                    mvr_remap = {idx[i]: (model.name, i) for i in range(len(idx))}
+
                 if len(idx) == 0:
                     new_recarray = None
                 else:
@@ -594,7 +604,10 @@ class Mf6Splitter(object):
 
                 mapped_data[mkey][item] = new_recarray
 
-        return mapped_data
+        if not transient:
+            return mapped_data
+        else:
+            return mapped_data, mvr_remap
 
     def _remap_uzf(self, package, mapped_data):
         """
@@ -632,6 +645,7 @@ class Mf6Splitter(object):
             new_model[ix] = nm
             new_node[ix] = nn
 
+        mvr_remap = {}
         for mkey, model in self._model_dict.items():
             idx = np.where(new_model == mkey)[0]
             if len(idx) == 0:
@@ -643,6 +657,8 @@ class Mf6Splitter(object):
                 uzf_remap = {i: ix for ix, i in enumerate(new_recarray.iuzno)}
                 uzf_nodes = [i for i in uzf_remap.keys()]
                 uzf_remap[-1] = -1
+                for oid, nid in uzf_remap:
+                    mvr_remap[oid] = (model.name, nid)
 
             model_node = new_node[idx].astype(int)
             if self._modelgrid.grid_type == "structured":
@@ -676,6 +692,13 @@ class Mf6Splitter(object):
             mapped_data[mkey]['nwavesets'] = package.nwavesets.array
             mapped_data[mkey]["perioddata"] = spd
 
+        if self._pkg_mover:
+            for per in range(self._model.nper):
+                if per in self._mover_remaps:
+                    self._mover_remaps[per][package.name[0]] = mvr_remap
+                else:
+                    self._mover_remaps[per] = {package.name[0]: mvr_remap}
+
         return mapped_data
 
     def _remap_mvr(self, package, mapped_data):
@@ -692,11 +715,47 @@ class Mf6Splitter(object):
         -------
             dict
         """
-        self._mvr_remaps = {}
+        # self._mvr_remaps = {}
         perioddata = package.perioddata.data
-        # todo can't remap until LAK and SFR are finished...
-        print('break')
+        for mkey, model in self._model_dict.items():
+            spd = {}
+            maxmvr = 0
+            for per, recarray in perioddata.items():
+                mover_remaps = self._mover_remaps[per]
+                new_records = []
+                externals = []
+                for rec in recarray:
+                    mname1, nid1 = mover_remaps[rec.pname1][rec.id1]
+                    if mname1 != model.name:
+                        continue
+                    mname2, nid2 = mover_remaps[rec.pname2][rec.id2]
+                    if mname1 != mname2:
+                        new_rec = (mname1, rec.pname1, nid1, mname2, rec.pname2, nid2, rec.mvrtype, rec.value)
+                        externals.append(new_rec)
+                    else:
+                        new_rec = (rec.pname1, nid1, rec.pname2, nid2, rec.mvrtype, rec.value)
+                        new_records.append(new_rec)
 
+                if new_records:
+                    if len(new_records) > maxmvr:
+                        maxmvr = len(new_records)
+
+                    spd[per] = new_records
+
+                if externals:
+                    if per in self._sim_mover_data:
+                        for rec in externals:
+                            self._sim_mover_data[per].append(rec)
+                    else:
+                        self._sim_mover_data[per] = externals
+
+            if spd:
+                mapped_data[mkey]["perioddata"] = spd
+                mapped_data[mkey]["maxmvr"] = maxmvr
+                mapped_data[mkey]["maxpackages"] = len(package.packages.array)
+                mapped_data[mkey]["packages"] = package.packages.array
+
+        return mapped_data
 
     def _remap_lak(self, package, mapped_data):
         """
@@ -711,6 +770,8 @@ class Mf6Splitter(object):
         -------
             dict
         """
+        # todo: refactor the self._lak, self._sfr, self._uzf remaps.
+        #  Unnecessary now
         packagedata = package.packagedata.array
         connectiondata = package.connectiondata.array
         tables = package.tables.array
@@ -810,6 +871,19 @@ class Mf6Splitter(object):
                     if new_tables is not None:
                         mapped_data[mkey]["ntables"] = len(new_tables)
 
+        if self._pkg_mover:
+            mvr_remap = {}
+            for oid, (mkey, nid) in self._lak_remaps.items():
+                name = self._model_dict[mkey].name
+                mvr_remap[oid] = (name, nid)
+
+            for per in range(self._model.nper):
+                if per in self._mover_remaps:
+                    self._mover_remaps[per][package.name[0]] = mvr_remap
+
+                else:
+                    self._mover_remaps[per] = {package.name[0]: mvr_remap}
+
         return mapped_data
 
     def _remap_sfr(self, package, mapped_data):
@@ -892,29 +966,36 @@ class Mf6Splitter(object):
                 # now let's remap connection data and tag external exchanges
                 idx = np.where(np.isin(connectiondata.rno, old_rno))[0]
                 new_connectiondata = connectiondata[idx]
-
+                ncons = []
                 for ix, rec in enumerate(new_connectiondata):
                     new_rec = []
+                    nan_count = 0
                     for item in new_connectiondata.dtype.names:
                         if rec[item] in self._sfr_remaps:
                             mn, nrno = self._sfr_remaps[rec[item]]
                             if mn != mkey:
-                                new_rec.append(np.nan)
+                                nan_count += 1
                             else:
                                 new_rec.append(self._sfr_remaps[rec[item]][-1])
                         elif np.isnan(rec[item]):
-                            new_rec.append(np.nan)
+                            nan_count += 1
                         else:
                             # this is an instance where we need to map
                             # external connections!
-                            new_rec.append(np.nan)
+                            nan_count += 1
                             if rec[item] < 0:
                                 # downstream connection
                                 sfr_mvr_conn.append((rec["rno"], int(abs(rec[item]))))
                             else:
                                 sfr_mvr_conn.append((int(rec[item]), rec["rno"]))
-
+                    # sort the new_rec so nan is last
+                    ncons.append(len(new_rec) - 1)
+                    if nan_count > 0:
+                        new_rec += [np.nan,] * nan_count
                     new_connectiondata[ix] = tuple(new_rec)
+
+                # now we need to go back and change ncon....
+                new_recarray["ncon"] = ncons
 
                 new_crosssections = None
                 if crosssections is not None:
@@ -987,23 +1068,47 @@ class Mf6Splitter(object):
                 mapped_data[mkey]["perioddata"] = spd
                 mapped_data[mkey]["nreaches"] = len(new_recarray)
 
+        # connect model network through movers between models
+        mvr_recs = []
         for rec in sfr_mvr_conn:
             m0, n0 = self._sfr_remaps[rec[0]]
             m1, n1 = self._sfr_remaps[rec[1]]
-            self._sfr_mover_connections.append(
-                [self._model_dict[m0].name, n0,
-                 self._model_dict[m1].name, n1,
-                 "FACTOR", 1]
-            )
+            mvr_recs.append((self._model_dict[m0].name, package.name[0], n0,
+                             self._model_dict[m1].name, package.name[0], n1,
+                             "FACTOR", 1))
 
         for idv, rec in div_mvr_conn.items():
             m0, n0 = self._sfr_remaps[rec[0]]
             m1, n1 = self._sfr_remaps[rec[1]]
-            self._sfr_mover_connections.append(
-                [self._model_dict[m0].name, n0,
-                 self._model_dict[m1].name, n1,
-                 rec[2], rec[3]]
-            )
+            mvr_recs.append((self._model_dict[m0].name, package.name[0], n0,
+                             self._model_dict[m1].name, package.name[0], n1,
+                             rec[2], rec[3]))
+
+        if mvr_recs:
+            for mkey in self._model_dict.keys():
+                mapped_data[mkey]["mover"] = True
+            for per in range(self._model.nper):
+                if per in self._sim_mover_data:
+                    for rec in mvr_recs:
+                        self._sim_mover_data[per].append(rec)
+                else:
+                    self._sim_mover_data[per] = mvr_recs
+
+        # create a remap table for movers between models
+        if self._pkg_mover:
+            mvr_remap = {}
+            for oid, (mkey, nid) in self._sfr_remaps.items():
+                if oid < 0:
+                    continue
+                name = self._model_dict[mkey].name
+                mvr_remap[oid] = (name, nid)
+
+            for per in range(self._model.nper):
+                if per in self._mover_remaps:
+                    self._mover_remaps[per][package.name[0]] = mvr_remap
+
+                else:
+                    self._mover_remaps[per] = {package.name[0]: mvr_remap}
 
         return mapped_data
 
@@ -1048,18 +1153,26 @@ class Mf6Splitter(object):
         """
         d0 = {mkey: {} for mkey in self._model_dict.keys()}
         for per, recarray in mftransientlist.data.items():
-            d = self._remap_mflist(item, recarray, mapped_data)
+            d, mvr_remaps = self._remap_mflist(item, recarray, mapped_data, transient=True)
             for mkey in self._model_dict.keys():
                 if mapped_data[mkey][item] is None:
                     continue
                 d0[mkey][per] = mapped_data[mkey][item]
+
+            if mvr_remaps:
+                if per in self._mover_remaps:
+                    self._mover_remaps[per][self._pkg_mover_name] = mvr_remaps
+                else:
+                    self._mover_remaps[per] = {
+                        self._pkg_mover_name : mvr_remaps
+                    }
 
         for mkey in self._model_dict.keys():
             mapped_data[mkey][item] = d0[mkey]
 
         return mapped_data
 
-    def _remap_package(self, package):
+    def _remap_package(self, package, ismvr=False):
         """
         Method to remap package data to new packages in each model
 
@@ -1067,19 +1180,25 @@ class Mf6Splitter(object):
         ----------
         package : flopy.mf6.Package
             Package object
+        ismvr : bool
+            boolean flag to indicate that this is a mover package
+            to remap
 
         Returns
         -------
             dict
         """
-        # todo: MVR package! needs to be handled differently!!!!
-        #   for MVR's that cross model boundaries a seperate dict will need
-        #   to be compiled and then a MVR will need to be built with the
-        #   exchange model
-
         # todo: child packages??? This is an issue that still needs solving.
 
         mapped_data = {mkey: {} for mkey in self._model_dict.keys()}
+
+        # check to see if the package has active movers
+        self._pkg_mover = False
+        if hasattr(package, 'mover'):
+            if package.mover.array:
+                self._pkg_mover = True
+                self._pkg_mover_name = package.name[0]
+
         if isinstance(package, flopy.mf6.ModflowUtlobs):
             return
 
@@ -1127,9 +1246,12 @@ class Mf6Splitter(object):
         elif isinstance(package, flopy.mf6.ModflowGwfuzf):
             mapped_data = self._remap_uzf(package, mapped_data)
 
+        elif ismvr:
+            self._remap_mvr(package, mapped_data)
+
         elif isinstance(package, flopy.mf6.ModflowGwfmvr):
-            pass
-            # mapped_data = self._remap_mvr(package, mapped_data)
+            self._mover = True
+            return {}
 
         elif isinstance(package, flopy.mf6.ModflowGwflak):
             mapped_data = self._remap_lak(package, mapped_data)
@@ -1192,7 +1314,9 @@ class Mf6Splitter(object):
                                                    self._model_type)
         paks = {}
         for mdl, data in mapped_data.items():
-            paks[mdl] = pak_cls(self._model_dict[mdl], **data)
+            paks[mdl] = pak_cls(self._model_dict[mdl],
+                                pname=package.name[0],
+                                **data)
 
         return paks
 
@@ -1321,7 +1445,27 @@ class Mf6Splitter(object):
                                 rec = [cellidm0, cellidm1, 1, cl0, cl1, hwva, angledegx, cdist]
                                 exchange_data.append(rec)
 
-                    if exchange_data:
+                    mvr_data = {}
+                    packages = []
+                    maxmvr = 0
+                    for per, mvrs in self._sim_mover_data.items():
+                        mname0 = self._model_dict[m0].name
+                        mname1 = self._model_dict[m1].name
+                        records = []
+                        for rec in mvrs:
+                            if rec[0] == mname0 or rec[3] == mname0:
+                                if rec[0] == mname1 or rec[3] == mname1:
+                                    records.append(rec)
+                                    if rec[1] not in packages:
+                                        packages.append((rec[0], rec[1]))
+                                    if rec[4] not in packages:
+                                        packages.append((rec[3], rec[4]))
+                        if records:
+                            if len(records) > maxmvr:
+                                maxmvr = len(records)
+                            mvr_data[per] = records
+
+                    if exchange_data or mvr_data:
                         mname0 = self._model_dict[m0].name
                         mname1 = self._model_dict[m1].name
                         exchg = flopy.mf6.modflow.ModflowGwfgwf(
@@ -1331,9 +1475,21 @@ class Mf6Splitter(object):
                             exgmnameb=mname1,
                             auxiliary=["ANGLDEGX", "CDIST"],
                             nexg=len(exchange_data),
-                            exchangedata=exchange_data
+                            exchangedata=exchange_data,
                         )
                         d[f"{mname0}_{mname1}"] = exchg
+
+                        if mvr_data:
+                            mvr = flopy.mf6.modflow.ModflowGwfmvr(
+                                exchg,
+                                modelnames=True,
+                                maxmvr=maxmvr,
+                                maxpackages=len(packages),
+                                packages=packages,
+                                perioddata=mvr_data
+                            )
+
+                        d[f"{mname0}_{mname1}_mvr"] = exchg
 
                 built.append(m0)
 
@@ -1364,6 +1520,10 @@ class Mf6Splitter(object):
 
         for package in self._model.packagelist:
             paks = self._remap_package(package)
+
+        if self._mover:
+            mover = self._model.mvr
+            self._remap_package(mover, ismvr=True)
 
         epaks = self._create_exchanges()
 

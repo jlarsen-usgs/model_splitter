@@ -9,8 +9,8 @@ BEGIN PACKAGES
   OC6           lakeex2a.oc
   EVT6          lakeex2a.evt
   RCH6          lakeex2a.rch
-  SFR6          lakeex2a.sfr
-  LAK6          lakeex2a.lak
+  SFR6          lakeex2a.sfr fred
+  LAK6          lakeex2a.lak ted
   CHD6          lakeex2a.chd
   MVR6          lakeex2a.mvr
 END PACKAGES
