@@ -16,4 +16,7 @@ array[8:, :] = 1
 
 mfsplit = Mf6Splitter(sim)
 new_sim = mfsplit.split_model(array)
+new_sim.set_sim_path("temp2")
+new_sim.write_simulation()
+new_sim.run_simulation()
 print('break')
