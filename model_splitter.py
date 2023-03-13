@@ -559,23 +559,8 @@ class Mf6Splitter(object):
                 mapped_data[model][item] = recarray.copy()
         else:
             cellids = recarray.cellid
-            if self._modelgrid.grid_type in ("structured", "vertex"):
-                lay_num = np.array([i[0] for i in cellids])
-                if self._modelgrid.grid_type == "structured":
-                    nodes = self._modelgrid.get_node(cellids.tolist())
-                    nodes -= (lay_num * self._modelgrid.ncpl)
-                else:
-                    nodes = np.array([i[1] for i in cellids])
-
-            else:
-                nodes = np.array([i[0] for i in cellids])
-
-            new_model = np.zeros(cellids.shape)
-            new_node = np.zeros(cellids.shape)
-            for ix, node in enumerate(nodes):
-                nm, nn = self._node_map[node]
-                new_model[ix] = nm
-                new_node[ix] = nn
+            lay_num, nodes = self._cellid_to_layer_node(cellids)
+            new_model, new_node = self._get_new_model_new_node(nodes)
 
             for mkey, model in self._model_dict.items():
                 idx = np.where(new_model == mkey)[0]
@@ -585,20 +570,7 @@ class Mf6Splitter(object):
                 if len(idx) == 0:
                     new_recarray = None
                 else:
-                    model_node = new_node[idx].astype(int)
-                    if self._modelgrid.grid_type == "structured":
-                        model_node += (lay_num[idx] * model.modelgrid.ncpl)
-                        new_cellids = model.modelgrid.get_lrc(
-                            model_node.astype(int)
-                        )
-                    elif self._modelgrid.grid_type == "vertex":
-                        new_cellids = [
-                            tuple(cid) for cid in zip(lay_num[idx], model_node)
-                        ]
-
-                    else:
-                        new_cellids = [(i,) for i in model_node]
-
+                    new_cellids = self._new_node_to_cellid(model, new_node, lay_num, idx)
                     new_recarray = recarray[idx]
                     new_recarray["cellid"] = new_cellids
 
@@ -627,23 +599,8 @@ class Mf6Splitter(object):
         perioddata = package.perioddata.data
 
         cellids = packagedata.cellid
-        if self._modelgrid.grid_type == "structured":
-            cellids = [(0, i[1], i[2]) for i in packagedata.cellid]
-            layers = np.array([i[0] for i in packagedata.cellid])
-            nodes = self._modelgrid.get_node(cellids)
-        elif self._modelgrid.grid_type == "vertex":
-            layers = np.array([i[0] for i in packagedata.cellid])
-            nodes = [i[1] for i in packagedata.cellid]
-        else:
-            nodes = [i[0] for i in packagedata.cellid]
-            layers = None
-
-        new_model = np.zeros((len(cellids),), dtype=int)
-        new_node = np.zeros((len(cellids),), dtype=int)
-        for ix, node in enumerate(nodes):
-            nm, nn = self._node_map[node]
-            new_model[ix] = nm
-            new_node[ix] = nn
+        layers, nodes = self._cellid_to_layer_node(cellids)
+        new_model, new_node = self._get_new_model_new_node(nodes)
 
         mvr_remap = {}
         for mkey, model in self._model_dict.items():
@@ -660,21 +617,7 @@ class Mf6Splitter(object):
                 for oid, nid in uzf_remap:
                     mvr_remap[oid] = (model.name, nid)
 
-            model_node = new_node[idx].astype(int)
-            if self._modelgrid.grid_type == "structured":
-                model_node += (layers[idx] * model.modelgrid.ncpl)
-                new_cellids = model.modelgrid.get_lrc(
-                    model_node.astype(int)
-                )
-            elif self._modelgrid.grid_type == "vertex":
-                new_cellids = [
-                    tuple(cid) for cid in zip(layers[idx], model_node)
-                ]
-
-            else:
-                new_cellids = [(i,) for i in model_node]
-
-            if new_recarray is not None:
+                new_cellids = self._new_node_to_cellid(model, new_node, layers, idx)
                 new_recarray["cellid"] = new_cellids
                 new_recarray["iuzno"] = [uzf_remap[i] for i in new_recarray["iuzno"]]
                 new_recarray["ivertcon"] = [uzf_remap[i] for i in new_recarray["ivertcon"]]
@@ -771,7 +714,7 @@ class Mf6Splitter(object):
             dict
         """
         # todo: refactor the self._lak, self._sfr, self._uzf remaps.
-        #  Unnecessary now
+        #  they are unnecessary now
         packagedata = package.packagedata.array
         connectiondata = package.connectiondata.array
         tables = package.tables.array
@@ -781,23 +724,9 @@ class Mf6Splitter(object):
         # todo: think we can generalize this method and then call it as a
         #  function by most/all advanced packages...
         cellids = connectiondata.cellid
-        if self._modelgrid.grid_type == "structured":
-            cellids = [(0, i[1], i[2]) for i in cellids]
-            layers = np.array([i[0] for i in connectiondata.cellid])
-            nodes = self._modelgrid.get_node(cellids)
-        elif self._modelgrid.grid_type == "vertex":
-            layers = np.array([i[0] for i in connectiondata.cellid])
-            nodes = [i[1] for i in cellids]
-        else:
-            nodes = [i[0] for i in cellids]
-            layers = None
+        layers, nodes = self._cellid_to_layer_node(cellids)
 
-        new_model = np.zeros((len(cellids),), dtype=int)
-        new_node = np.zeros((len(cellids),), dtype=int)
-        for ix, node in enumerate(nodes):
-            nm, nn = self._node_map[node]
-            new_model[ix] = nm
-            new_node[ix] = nn
+        new_model, new_node = self._get_new_model_new_node(nodes)
 
         for mkey, model in self._model_dict.items():
             idx = np.where(new_model == mkey)[0]
@@ -807,20 +736,7 @@ class Mf6Splitter(object):
                 new_recarray = connectiondata[idx]
 
             if new_recarray is not None:
-                model_node = new_node[idx].astype(int)
-                if self._modelgrid.grid_type == "structured":
-                    model_node += (layers[idx] * model.modelgrid.ncpl)
-                    new_cellids = model.modelgrid.get_lrc(
-                        model_node.astype(int)
-                    )
-                elif self._modelgrid.grid_type == "vertex":
-                    new_cellids = [
-                        tuple(cid) for cid in zip(layers[idx], model_node)
-                    ]
-
-                else:
-                    new_cellids = [(i,) for i in model_node]
-
+                new_cellids = self._new_node_to_cellid(model, new_node, layers, idx)
                 new_recarray["cellid"] = new_cellids
 
                 for nlak, lak in enumerate(sorted(np.unique(new_recarray.lakeno))):
@@ -907,26 +823,12 @@ class Mf6Splitter(object):
 
         div_mvr_conn = {}
         sfr_mvr_conn = []
-        # sub-method #1 to split out
+
         cellids = packagedata.cellid
-        if self._modelgrid.grid_type == "structured":
-            cellids = [(0, i[1], i[2]) for i in cellids]
-            layers = np.array([i[0] for i in packagedata.cellid])
-            nodes = self._modelgrid.get_node(cellids)
-        elif self._modelgrid.grid_type == "vertex":
-            layers = np.array([i[0] for i in packagedata.cellid])
-            nodes = [i[1] for i in cellids]
-        else:
-            nodes = [i[0] for i in cellids]
-            layers = None
+        layers, nodes = self._cellid_to_layer_node(cellids)
 
         # sub method #2 to split out on generalize
-        new_model = np.zeros((len(cellids),), dtype=int)
-        new_node = np.zeros((len(cellids),), dtype=int)
-        for ix, node in enumerate(nodes):
-            nm, nn = self._node_map[node]
-            new_model[ix] = nm
-            new_node[ix] = nn
+        new_model, new_node = self._get_new_model_new_node(nodes)
 
         for mkey, model in self._model_dict.items():
             idx = np.where(new_model == mkey)[0]
@@ -937,20 +839,7 @@ class Mf6Splitter(object):
 
             # sub-method # 3 to split and generalize
             if new_recarray is not None:
-                model_node = new_node[idx].astype(int)
-                if self._modelgrid.grid_type == "structured":
-                    model_node += (layers[idx] * model.modelgrid.ncpl)
-                    new_cellids = model.modelgrid.get_lrc(
-                        model_node.astype(int)
-                    )
-                elif self._modelgrid.grid_type == "vertex":
-                    new_cellids = [
-                        tuple(cid) for cid in zip(layers[idx], model_node)
-                    ]
-
-                else:
-                    new_cellids = [(i,) for i in model_node]
-
+                new_cellids = self._new_node_to_cellid(model, new_node, layers, idx)
                 new_recarray["cellid"] = new_cellids
 
                 new_rno = []
@@ -1112,6 +1001,129 @@ class Mf6Splitter(object):
 
         return mapped_data
 
+    def _remap_maw(self, package, mapped_data):
+        """
+
+        :param package:
+        :param mapped_data:
+        :return:
+        """
+        pass
+
+    def _remap_hfb(self, package, mapped_data):
+        """
+
+        :param package:
+        :param mapped_data:
+        :return:
+        """
+        spd = {}
+        for per, recarray in package.stress_period_data.data.items():
+            per_dict = {}
+            cellids1 = recarray.cellid1
+            cellids2 = recarray.cellid2
+            layers1, nodes1 = self._cellid_to_layer_node(cellids1)
+            layers2, nodes2 = self._cellid_to_layer_node(cellids2)
+            new_model1, new_node1 = self._get_new_model_new_node(nodes1)
+            new_model2, new_node2 = self._get_new_model_new_node(nodes2)
+            if not (new_model1 == new_model2).all():
+                raise AssertionError("Models cannot be split along faults")
+
+            for mkey, model in self._model_dict.items():
+                idx = np.where(new_model1 == mkey)[0]
+                if len(idx) == 0:
+                    new_recarray = None
+                else:
+                    new_recarray = recarray[idx]
+
+                if new_recarray is not None:
+                    new_cellids1 = self._new_node_to_cellid(
+                        model, new_node1, layers1, idx
+                    )
+                    new_cellids2 = self._new_node_to_cellid(
+                        model, new_node2, layers2, idx
+                    )
+                    new_recarray["cellid1"] = new_cellids1
+                    new_recarray["cellid2"] = new_cellids2
+                    per_dict[mkey] = new_recarray
+
+            for mkey, rec in per_dict.items():
+                if "stress_period_data" not in mapped_data[mkey]:
+                    mapped_data[mkey]["stress_period_data"] = {per: rec}
+                else:
+                    mapped_data[mkey]['stress_period_data'][per] = rec
+
+        return mapped_data
+
+    def _cellid_to_layer_node(self, cellids):
+        """
+        Method to convert cellids to node numbers
+
+        Parameters
+        ----------
+        cellids :
+
+        Returns
+        -------
+        tuple (list of layers, list of nodes)
+        """
+        if self._modelgrid.grid_type == "structured":
+            layers = np.array([i[0] for i in cellids])
+            cellids = [(0, i[1], i[2]) for i in cellids]
+            nodes = self._modelgrid.get_node(cellids)
+        elif self._modelgrid.grid_type == "vertex":
+            layers = np.array([i[0] for i in cellids])
+            nodes = [i[1] for i in cellids]
+        else:
+            nodes = [i[0] for i in cellids]
+            layers = None
+
+        return layers, nodes
+
+    def _get_new_model_new_node(self, nodes):
+        """
+        Method to get new model number and node number from the node map
+
+        :param nodes:
+        :return:
+        """
+        # sub method #2 to split out on generalize
+        new_model = np.zeros((len(nodes),), dtype=int)
+        new_node = np.zeros((len(nodes),), dtype=int)
+        for ix, node in enumerate(nodes):
+            nm, nn = self._node_map[node]
+            new_model[ix] = nm
+            new_node[ix] = nn
+
+        return new_model, new_node
+
+    def _new_node_to_cellid(self, model, new_node, layers, idx):
+        """
+
+        model:
+        new_node:
+        layers:
+        idx:
+
+        :return:
+        """
+
+        new_node = new_node[idx].astype(int)
+        if self._modelgrid.grid_type == "structured":
+            new_node += (layers[idx] * model.modelgrid.ncpl)
+            new_cellids = model.modelgrid.get_lrc(
+                new_node.astype(int)
+            )
+        elif self._modelgrid.grid_type == "vertex":
+            new_cellids = [
+                tuple(cid) for cid in zip(layers[idx], new_node)
+            ]
+
+        else:
+            new_cellids = [(i,) for i in new_node]
+
+        return new_cellids
+
     def _remap_adv_tag(self, mkey, recarray, item, mapper):
         """
 
@@ -1242,6 +1254,9 @@ class Mf6Splitter(object):
 
                 elif isinstance(value, flopy.mf6.data.mfdataarray.MFArray):
                     mapped_data = self._remap_array(item, value, mapped_data)
+
+        elif isinstance(package, flopy.mf6.ModflowGwfhfb):
+            mapped_data = self._remap_hfb(package, mapped_data)
 
         elif isinstance(package, flopy.mf6.ModflowGwfuzf):
             mapped_data = self._remap_uzf(package, mapped_data)
