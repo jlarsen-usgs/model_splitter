@@ -34,9 +34,8 @@ class Mf6Splitter(object):
         self._connection_ivert = None
         self._model_dict = None
         self._ivert_vert_remap = None
-        self._sfr_remaps = {} # remove me later
         self._uzf_remap = {} # remove me later
-        self._lak_remaps = {} # remove me later
+        lak_remaps = {} # remove me later
         self._sfr_mover_connections = [] # keep SFR mover connections, but will need to store package name information too!!!!
         self._mover = False
         self._pkg_mover = False
@@ -602,6 +601,8 @@ class Mf6Splitter(object):
         layers, nodes = self._cellid_to_layer_node(cellids)
         new_model, new_node = self._get_new_model_new_node(nodes)
 
+        # TODO: update the uzf remap routine to be consistent with the
+        #  other advanced packages
         mvr_remap = {}
         for mkey, model in self._model_dict.items():
             idx = np.where(new_model == mkey)[0]
@@ -713,16 +714,13 @@ class Mf6Splitter(object):
         -------
             dict
         """
-        # todo: refactor the self._lak, self._sfr, self._uzf remaps.
-        #  they are unnecessary now
         packagedata = package.packagedata.array
         connectiondata = package.connectiondata.array
         tables = package.tables.array
         outlets = package.outlets.array
         perioddata = package.perioddata.data
-
-        # todo: think we can generalize this method and then call it as a
-        #  function by most/all advanced packages...
+        lak_remaps = {}
+        
         cellids = connectiondata.cellid
         layers, nodes = self._cellid_to_layer_node(cellids)
 
@@ -740,21 +738,21 @@ class Mf6Splitter(object):
                 new_recarray["cellid"] = new_cellids
 
                 for nlak, lak in enumerate(sorted(np.unique(new_recarray.lakeno))):
-                    self._lak_remaps[lak] = (mkey, nlak)
+                    lak_remaps[lak] = (mkey, nlak)
 
-                new_lak = [self._lak_remaps[i][-1] for i in new_recarray.lakeno]
+                new_lak = [lak_remaps[i][-1] for i in new_recarray.lakeno]
                 new_recarray["lakeno"] = new_lak
 
-                new_packagedata = self._remap_adv_tag(mkey, packagedata, "lakeno", self._lak_remaps)
+                new_packagedata = self._remap_adv_tag(mkey, packagedata, "lakeno", lak_remaps)
 
                 new_tables = None
                 if tables is not None:
-                    new_tables = self._remap_adv_tag(mkey, tables, "lakeno", self._lak_remaps)
+                    new_tables = self._remap_adv_tag(mkey, tables, "lakeno", lak_remaps)
 
                 new_outlets = None
                 if outlets is not None:
                     mapnos = []
-                    for lak, meta in self._lak_remaps.items():
+                    for lak, meta in lak_remaps.items():
                         if meta[0] == mkey:
                             mapnos.append(lak)
 
@@ -763,8 +761,8 @@ class Mf6Splitter(object):
                         new_outlets = None
                     else:
                         new_outlets = outlets[idxs]
-                        lakein = [self._lak_remaps[i][-1] for i in new_outlets.lakein]
-                        lakeout = [self._lak_remaps[i][-1] if i in self._lak_remaps else -1 for i in new_outlets.lakeout]
+                        lakein = [lak_remaps[i][-1] for i in new_outlets.lakein]
+                        lakeout = [lak_remaps[i][-1] if i in lak_remaps else -1 for i in new_outlets.lakeout]
                         outletno = list(range(len(new_outlets)))
                         new_outlets["outletno"] = outletno
                         new_outlets["lakein"] = lakein
@@ -772,7 +770,7 @@ class Mf6Splitter(object):
 
                 spd = {}
                 for k, recarray in perioddata.items():
-                    new_ra = self._remap_adv_tag(mkey, recarray, "number", self._lak_remaps)
+                    new_ra = self._remap_adv_tag(mkey, recarray, "number", lak_remaps)
                     spd[k] = new_ra
 
                 if new_recarray is not None:
@@ -788,17 +786,7 @@ class Mf6Splitter(object):
                         mapped_data[mkey]["ntables"] = len(new_tables)
 
         if self._pkg_mover:
-            mvr_remap = {}
-            for oid, (mkey, nid) in self._lak_remaps.items():
-                name = self._model_dict[mkey].name
-                mvr_remap[oid] = (name, nid)
-
-            for per in range(self._model.nper):
-                if per in self._mover_remaps:
-                    self._mover_remaps[per][package.name[0]] = mvr_remap
-
-                else:
-                    self._mover_remaps[per] = {package.name[0]: mvr_remap}
+            self._set_mover_remaps(package, lak_remaps)
 
         return mapped_data
 
@@ -820,14 +808,13 @@ class Mf6Splitter(object):
         connectiondata = package.connectiondata.array
         diversions = package.diversions.array
         perioddata = package.perioddata.data
-
+        sfr_remaps = {}
         div_mvr_conn = {}
         sfr_mvr_conn = []
 
         cellids = packagedata.cellid
         layers, nodes = self._cellid_to_layer_node(cellids)
 
-        # sub method #2 to split out on generalize
         new_model, new_node = self._get_new_model_new_node(nodes)
 
         for mkey, model in self._model_dict.items():
@@ -837,7 +824,6 @@ class Mf6Splitter(object):
             else:
                 new_recarray = packagedata[idx]
 
-            # sub-method # 3 to split and generalize
             if new_recarray is not None:
                 new_cellids = self._new_node_to_cellid(model, new_node, layers, idx)
                 new_recarray["cellid"] = new_cellids
@@ -847,8 +833,8 @@ class Mf6Splitter(object):
                 for ix, rno in enumerate(new_recarray.rno):
                     new_rno.append(ix)
                     old_rno.append(rno)
-                    self._sfr_remaps[rno] = (mkey, ix)
-                    self._sfr_remaps[-1 * rno] = (mkey, -1 * ix)
+                    sfr_remaps[rno] = (mkey, ix)
+                    sfr_remaps[-1 * rno] = (mkey, -1 * ix)
 
                 new_recarray["rno"] = new_rno
 
@@ -860,12 +846,12 @@ class Mf6Splitter(object):
                     new_rec = []
                     nan_count = 0
                     for item in new_connectiondata.dtype.names:
-                        if rec[item] in self._sfr_remaps:
-                            mn, nrno = self._sfr_remaps[rec[item]]
+                        if rec[item] in sfr_remaps:
+                            mn, nrno = sfr_remaps[rec[item]]
                             if mn != mkey:
                                 nan_count += 1
                             else:
-                                new_rec.append(self._sfr_remaps[rec[item]][-1])
+                                new_rec.append(sfr_remaps[rec[item]][-1])
                         elif np.isnan(rec[item]):
                             nan_count += 1
                         else:
@@ -889,7 +875,7 @@ class Mf6Splitter(object):
                 new_crosssections = None
                 if crosssections is not None:
                     new_crosssections = self._remap_adv_tag(
-                        mkey, crosssections, "rno", self._sfr_remaps
+                        mkey, crosssections, "rno", sfr_remaps
                     )
 
                 new_diversions = None
@@ -899,13 +885,13 @@ class Mf6Splitter(object):
                     for ix, rec in enumerate(diversions):
                         rno = rec.rno
                         iconr = rec.iconr
-                        if rno not in self._sfr_remaps and iconr not in self._sfr_remaps:
+                        if rno not in sfr_remaps and iconr not in sfr_remaps:
                             continue
-                        elif rno in self._sfr_remaps and iconr not in self._sfr_remaps:
+                        elif rno in sfr_remaps and iconr not in sfr_remaps:
                             div_mover_ix.append(ix)
                         else:
-                            m0 = self._sfr_remaps[rno][0]
-                            m1 = self._sfr_remaps[iconr][0]
+                            m0 = sfr_remaps[rno][0]
+                            m1 = sfr_remaps[iconr][0]
                             if m0 != m1:
                                 div_mover_ix.append(ix)
 
@@ -913,8 +899,8 @@ class Mf6Splitter(object):
                     idx = np.where(~np.isin(idx, div_mover_ix))[0]
 
                     new_diversions = diversions[idx]
-                    new_rno = [self._sfr_remaps[i][-1] for i in new_diversions.rno]
-                    new_iconr = [self._sfr_remaps[i][-1] for i in new_diversions.iconr]
+                    new_rno = [sfr_remaps[i][-1] for i in new_diversions.rno]
+                    new_iconr = [sfr_remaps[i][-1] for i in new_diversions.iconr]
                     new_idv = list(range(len(new_diversions)))
                     new_diversions["rno"] = new_rno
                     new_diversions["iconr"] = new_iconr
@@ -946,7 +932,7 @@ class Mf6Splitter(object):
                         new_spd = new_spd[idx]
 
                     # now to renamp the rnos...
-                    new_rno = [self._sfr_remaps[i][-1] for i in new_spd.rno]
+                    new_rno = [sfr_remaps[i][-1] for i in new_spd.rno]
                     new_spd["rno"] = new_rno
                     spd[kper] = new_spd
 
@@ -960,15 +946,15 @@ class Mf6Splitter(object):
         # connect model network through movers between models
         mvr_recs = []
         for rec in sfr_mvr_conn:
-            m0, n0 = self._sfr_remaps[rec[0]]
-            m1, n1 = self._sfr_remaps[rec[1]]
+            m0, n0 = sfr_remaps[rec[0]]
+            m1, n1 = sfr_remaps[rec[1]]
             mvr_recs.append((self._model_dict[m0].name, package.name[0], n0,
                              self._model_dict[m1].name, package.name[0], n1,
                              "FACTOR", 1))
 
         for idv, rec in div_mvr_conn.items():
-            m0, n0 = self._sfr_remaps[rec[0]]
-            m1, n1 = self._sfr_remaps[rec[1]]
+            m0, n0 = sfr_remaps[rec[0]]
+            m1, n1 = sfr_remaps[rec[1]]
             mvr_recs.append((self._model_dict[m0].name, package.name[0], n0,
                              self._model_dict[m1].name, package.name[0], n1,
                              rec[2], rec[3]))
@@ -985,19 +971,7 @@ class Mf6Splitter(object):
 
         # create a remap table for movers between models
         if self._pkg_mover:
-            mvr_remap = {}
-            for oid, (mkey, nid) in self._sfr_remaps.items():
-                if oid < 0:
-                    continue
-                name = self._model_dict[mkey].name
-                mvr_remap[oid] = (name, nid)
-
-            for per in range(self._model.nper):
-                if per in self._mover_remaps:
-                    self._mover_remaps[per][package.name[0]] = mvr_remap
-
-                else:
-                    self._mover_remaps[per] = {package.name[0]: mvr_remap}
+            self._set_mover_remaps(package, sfr_remaps)
 
         return mapped_data
 
@@ -1008,8 +982,77 @@ class Mf6Splitter(object):
         :param mapped_data:
         :return:
         """
-        pass
+        connectiondata = package.connectiondata.array
+        packagedata = package.packagedata.array
+        perioddata = package.perioddata.data
 
+        cellids = connectiondata.cellid
+        layers, nodes = self._cellid_to_layer_node(cellids)
+        new_model, new_node = self._get_new_model_new_node(nodes)
+        maw_remaps = {}
+
+        for mkey, model in self._model_dict.items():
+            idx = np.where(new_model == mkey)[0]
+            new_connectiondata = connectiondata[idx]
+            if len(new_connectiondata) == 0:
+                continue
+            else:
+                new_cellids = self._new_node_to_cellid(
+                    model, new_node, layers, idx
+                )
+
+                maw_wellnos = []
+                for nmaw, maw in enumerate(sorted(np.unique(new_connectiondata.wellno))):
+                    maw_wellnos.append(maw)
+                    maw_remaps[maw] = (mkey, nmaw)
+
+                new_wellno = [maw_remaps[wl][-1] for wl in new_connectiondata.wellno]
+                new_connectiondata["cellid"] = new_cellids
+                new_connectiondata["wellno"] = new_wellno
+
+                new_packagedata = self._remap_adv_tag(
+                    mkey, packagedata, "wellno", maw_remaps
+                )
+
+                spd = {}
+                for per, recarray in perioddata.items():
+                    idx = np.where(np.isin(recarray.wellno, maw_wellnos))[0]
+                    if len(idx) > 0:
+                        new_recarray = recarray[idx]
+                        new_wellno = [maw_remaps[wl][-1] for wl in new_recarray.wellno]
+                        new_recarray["wellno"] = new_wellno
+                        spd[per] = new_recarray
+
+                mapped_data[mkey]["nmawwells"] = len(new_packagedata)
+                mapped_data[mkey]["packagedata"] = new_packagedata
+                mapped_data[mkey]["connectiondata"] = new_connectiondata
+                mapped_data[mkey]["perioddata"] = spd
+        
+        if self._pkg_mover:
+            self._set_mover_remaps(package, maw_remaps)
+
+        return mapped_data
+                
+    def _set_mover_remaps(self, package, pkg_remap):
+        """
+        
+        :param pkg_remap: 
+        :return: 
+        """
+        mvr_remap = {}
+        for oid, (mkey, nid) in pkg_remap.items():
+            if oid < 0:
+                continue
+            name = self._model_dict[mkey].name
+            mvr_remap[oid] = (name, nid)
+
+        for per in range(self._model.nper):
+            if per in self._mover_remaps:
+                self._mover_remaps[per][package.name[0]] = mvr_remap
+
+            else:
+                self._mover_remaps[per] = {package.name[0]: mvr_remap}
+        
     def _remap_hfb(self, package, mapped_data):
         """
 
@@ -1260,6 +1303,9 @@ class Mf6Splitter(object):
 
         elif isinstance(package, flopy.mf6.ModflowGwfuzf):
             mapped_data = self._remap_uzf(package, mapped_data)
+
+        elif isinstance(package, flopy.mf6.ModflowGwfmaw):
+            mapped_data = self._remap_maw(package, mapped_data)
 
         elif ismvr:
             self._remap_mvr(package, mapped_data)
